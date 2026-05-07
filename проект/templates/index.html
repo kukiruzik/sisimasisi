@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Тир – прицелься и стреляй</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <h1>🔫 Тир</h1>
+    <div id="score">Очки: 0</div>
+    <div id="timer">Цельтесь в мишень, чтобы начать!</div>
+
+    <div id="game-container">
+        <canvas id="gameCanvas" width="600" height="400"></canvas>
+    </div>
+
+    <div id="game-over">
+        <h2>Игра окончена!</h2>
+        <p>Ваш счёт: <span id="final-score"></span></p>
+        <input type="text" id="player-name" placeholder="Ваше имя" maxlength="20">
+        <button id="submit-score">Сохранить результат</button>
+        <button id="restart">Играть снова</button>
+    </div>
+
+    <div id="leaderboard">
+        <h3>Таблица лидеров</h3>
+        <ol id="leaderboard-list"></ol>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('game-container');
+        const scoreDisplay = document.getElementById('score');
+        const timerDisplay = document.getElementById('timer');
+        const gameOverDiv = document.getElementById('game-over');
+        const finalScoreSpan = document.getElementById('final-score');
+        const playerNameInput = document.getElementById('player-name');
+        const submitScoreBtn = document.getElementById('submit-score');
+        const restartBtn = document.getElementById('restart');
+        const leaderboardList = document.getElementById('leaderboard-list');
+
+        let currentTarget = null;
+        let score = 0;
+        let timeLeft = 30;
+        let gameActive = true;      // можно кликать по мишени
+        let gameStarted = false;    // таймер ещё не запущен
+        let timerInterval = null;
+        let targetFetchInterval = null;
+
+        async function fetchTarget() {
+            const resp = await fetch('/target');
+            const data = await resp.json();
+            currentTarget = data.target;
+            score = data.score;
+            scoreDisplay.textContent = `Очки: ${score}`;
+            drawTarget();
+        }
+
+        function drawTarget() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (!currentTarget || !gameActive) return;
+            const { x, y, radius } = currentTarget;
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, 2 * Math.PI);
+            ctx.fillStyle = '#e94560';
+            ctx.fill();
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(x, y, radius * 0.6, 0, 2 * Math.PI);
+            ctx.fillStyle = '#ffffff';
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(x, y, radius * 0.25, 0, 2 * Math.PI);
+            ctx.fillStyle = '#e94560';
+            ctx.fill();
+        }
+
+        // Всплывающий текст "+N"
+        function showFloatingText(text, x, y) {
+            const el = document.createElement('div');
+            el.className = 'float-text';
+            el.textContent = text;
+            // Координаты относительно canvas
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            // Позиция относительно контейнера, внутри которого canvas
+            const left = (x / scaleX) + (rect.left - container.getBoundingClientRect().left);
+            const top = (y / scaleY) + (rect.top - container.getBoundingClientRect().top);
+            el.style.left = left + 'px';
+            el.style.top = top + 'px';
+            container.appendChild(el);
+            el.addEventListener('animationend', () => el.remove());
+        }
+
+        canvas.addEventListener('click', async (e) => {
+            if (!gameActive || !currentTarget) return;
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const clickX = (e.clientX - rect.left) * scaleX;
+            const clickY = (e.clientY - rect.top) * scaleY;
+
+            const resp = await fetch('/shoot', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ x: clickX, y: clickY })
+            });
+            const data = await resp.json();
+            if (data.hit) {
+                score = data.score;
+                currentTarget = data.target;
+                scoreDisplay.textContent = `Очки: ${score}`;
+                drawTarget();
+                flashEffect();
+                if (data.points_earned) {
+                    showFloatingText(`+${data.points_earned}`, clickX, clickY);
+                }
+                // Запуск таймера при первом попадании
+                if (!gameStarted) {
+                    gameStarted = true;
+                    startTimer();
+                    timerDisplay.textContent = `Время: ${timeLeft} сек`;
+                }
+            } else {
+                score = data.score;
+                scoreDisplay.textContent = `Очки: ${score}`;
+                missEffect();
+            }
+        });
+
+        function flashEffect() {
+            canvas.style.transition = '0.1s';
+            canvas.style.filter = 'brightness(1.5)';
+            setTimeout(() => { canvas.style.filter = ''; }, 100);
+        }
+
+        function missEffect() {
+            canvas.style.transition = '0.1s';
+            canvas.style.filter = 'brightness(0.8)';
+            setTimeout(() => { canvas.style.filter = ''; }, 100);
+        }
+
+        function startTimer() {
+            timeLeft = 30;
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                timerDisplay.textContent = `Время: ${timeLeft} сек`;
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    endGame();
+                }
+            }, 1000);
+        }
+
+        async function endGame() {
+            gameActive = false;
+            clearInterval(timerInterval);
+            clearInterval(targetFetchInterval);
+            currentTarget = null;
+            drawTarget();
+            gameOverDiv.style.display = 'block';
+            finalScoreSpan.textContent = score;
+
+            const resp = await fetch('/end_game', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: 'Игрок' })
+            });
+            const data = await resp.json();
+            updateLeaderboard(data.leaderboard);
+        }
+
+        submitScoreBtn.addEventListener('click', async () => {
+            const name = playerNameInput.value.trim() || 'Аноним';
+            const resp = await fetch('/end_game', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name })
+            });
+            const data = await resp.json();
+            updateLeaderboard(data.leaderboard);
+            submitScoreBtn.disabled = true;
+            playerNameInput.disabled = true;
+        });
+
+        function updateLeaderboard(leaders) {
+            leaderboardList.innerHTML = '';
+            leaders.forEach(entry => {
+                const li = document.createElement('li');
+                li.textContent = `${entry.name}: ${entry.score}`;
+                leaderboardList.appendChild(li);
+            });
+        }
+
+        restartBtn.addEventListener('click', () => {
+            location.reload();
+        });
+
+        // Инициализация игры
+        (async function init() {
+            await fetchTarget();
+            // Периодически синхронизируем мишень (на случай потери связи)
+            targetFetchInterval = setInterval(async () => {
+                if (gameActive) {
+                    const resp = await fetch('/target');
+                    const data = await resp.json();
+                    currentTarget = data.target;
+                    score = data.score;
+                    scoreDisplay.textContent = `Очки: ${score}`;
+                    drawTarget();
+                }
+            }, 2000);
+        })();
+    </script>
+</body>
+</html>
