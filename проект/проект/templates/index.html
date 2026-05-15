@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Тир – 5 мишеней, комбо</title>
+    <link rel="stylesheet" href="static/style.css">
+
+</head>
+<body>
+    <h1>Тир</h1>
+    <div id="score">Очки: 0</div>
+    <div id="timer">Цельтесь, чтобы начать!</div>
+
+    <div id="game-container">
+        <canvas id="gameCanvas" width="600" height="400"></canvas>
+        <div id="combo-display"></div>
+    </div>
+
+    <div id="game-over">
+        <h2>Игра окончена!</h2>
+        <p>Ваш счёт: <span id="final-score"></span></p>
+        <input type="text" id="player-name" placeholder="Ваше имя" maxlength="20">
+        <button id="submit-score">Сохранить результат</button>
+        <button id="restart">Играть снова</button>
+    </div>
+
+    <div id="leaderboard">
+        <h3>Таблица лидеров</h3>
+        <ol id="leaderboard-list"></ol>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('game-container');
+        const scoreDisplay = document.getElementById('score');
+        const timerDisplay = document.getElementById('timer');
+        const comboDisplay = document.getElementById('combo-display');
+        const gameOverDiv = document.getElementById('game-over');
+        const finalScoreSpan = document.getElementById('final-score');
+        const playerNameInput = document.getElementById('player-name');
+        const submitScoreBtn = document.getElementById('submit-score');
+        const restartBtn = document.getElementById('restart');
+        const leaderboardList = document.getElementById('leaderboard-list');
+
+        let currentTarget = null;
+        let score = 0;
+        let combo = 0;
+        let timeLeft = 30;
+        let gameActive = true;
+        let gameStarted = false;
+        let timerInterval = null;
+
+        // --- Звуки (Web Audio API) ---
+        let audioCtx = null;
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+        }
+        function playTone(freq, duration, type = 'sine', volume = 0.3) {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.value = freq;
+            gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + duration);
+        }
+        function playHitSound(comboLevel) {
+            initAudio();
+            if (comboLevel >= 3) {
+                playTone(523, 0.1, 'sine', 0.3);
+                setTimeout(() => playTone(659, 0.1, 'sine', 0.3), 50);
+                setTimeout(() => playTone(784, 0.2, 'sine', 0.3), 100);
+            } else {
+                playTone(800, 0.08, 'square', 0.2);
+            }
+        }
+        function playMissSound() {
+            initAudio();
+            playTone(150, 0.15, 'triangle', 0.2);
+        }
+
+        // --- Отрисовка мишени ---
+        function drawTarget() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (!currentTarget || !gameActive) return;
+
+            const { x, y, radius, color, base_points } = currentTarget;
+
+            // Внешний круг
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, 2 * Math.PI);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Внутренние кольца
+            ctx.beginPath();
+            ctx.arc(x, y, radius * 0.6, 0, 2 * Math.PI);
+            ctx.fillStyle = '#ffffff';
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(x, y, radius * 0.25, 0, 2 * Math.PI);
+            ctx.fillStyle = color;
+            ctx.fill();
+
+            // Текст с базовыми очками под мишенью
+            ctx.font = 'bold 14px Arial';
+            ctx.fillStyle = 'white';
+            ctx.textAlign = 'center';
+            ctx.fillText(`Очки: ${base_points}`, x, y + radius + 16);
+        }
+
+        // Обновление комбо-индикатора (только на холсте)
+        function updateComboDisplay() {
+            if (combo >= 2) {
+                const mult = (1 + 0.25 * (combo - 1)).toFixed(2);
+                comboDisplay.style.display = 'block';
+                comboDisplay.textContent = `×${mult}`;
+            } else {
+                comboDisplay.style.display = 'none';
+            }
+        }
+
+        // Всплывающий текст +N
+        function showFloatingText(text, x, y) {
+            const el = document.createElement('div');
+            el.className = 'float-text';
+            el.textContent = text;
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const left = (x / scaleX) + (rect.left - container.getBoundingClientRect().left);
+            const top = (y / scaleY) + (rect.top - container.getBoundingClientRect().top);
+            el.style.left = left + 'px';
+            el.style.top = top + 'px';
+            container.appendChild(el);
+            el.addEventListener('animationend', () => el.remove());
+        }
+
+        // Загрузка текущей мишени с сервера
+        async function fetchTarget() {
+            const resp = await fetch('/target');
+            const data = await resp.json();
+            currentTarget = data.target;
+            score = data.score;
+            combo = data.combo;
+            scoreDisplay.textContent = `Очки: ${score}`;
+            updateComboDisplay();
+            drawTarget();
+        }
+
+        // Обработка клика по холсту
+        canvas.addEventListener('click', async (e) => {
+            if (!gameActive || !currentTarget) return;
+            initAudio();
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const clickX = (e.clientX - rect.left) * scaleX;
+            const clickY = (e.clientY - rect.top) * scaleY;
+
+            const resp = await fetch('/shoot', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ x: clickX, y: clickY })
+            });
+            const data = await resp.json();
+
+            currentTarget = data.target;
+            score = data.score;
+            combo = data.combo;
+            scoreDisplay.textContent = `Очки: ${score}`;
+            updateComboDisplay();
+            drawTarget();
+
+            if (data.hit) {
+                playHitSound(combo);
+                if (data.points_earned) {
+                    showFloatingText(`+${data.points_earned}`, clickX, clickY);
+                }
+                if (!gameStarted) {
+                    gameStarted = true;
+                    startTimer();
+                }
+            } else {
+                playMissSound();
+            }
+        });
+
+        // Таймер
+        function startTimer() {
+            timeLeft = 30;
+            timerDisplay.textContent = `Время: ${timeLeft} сек`;
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                timerDisplay.textContent = `Время: ${timeLeft} сек`;
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    endGame();
+                }
+            }, 1000);
+        }
+
+        async function endGame() {
+            gameActive = false;
+            clearInterval(timerInterval);
+            currentTarget = null;
+            drawTarget();
+            gameOverDiv.style.display = 'block';
+            finalScoreSpan.textContent = score;
+            comboDisplay.style.display = 'none';
+        }
+
+        // Сохранение результата
+        submitScoreBtn.addEventListener('click', async () => {
+            if (submitScoreBtn.disabled) return;
+            const name = playerNameInput.value.trim() || 'Аноним';
+            submitScoreBtn.disabled = true;
+            playerNameInput.disabled = true;
+            const resp = await fetch('/end_game', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name })
+            });
+            const data = await resp.json();
+            leaderboardList.innerHTML = '';
+            data.leaderboard.forEach(entry => {
+                const li = document.createElement('li');
+                li.textContent = `${entry.name}: ${entry.score}`;
+                leaderboardList.appendChild(li);
+            });
+        });
+
+        restartBtn.addEventListener('click', () => {
+            location.reload();
+        });
+
+        // Старт
+        fetchTarget();
+    </script>
+</body>
+</html>
